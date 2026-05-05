@@ -6,34 +6,21 @@ from email.mime.text import MIMEText
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 # --- ターゲット設定 ---
 FACILITIES = {
-    "梅田": {"id": "114", "targets": ["体育館反面A", "体育館反面B"]},
-    "中央本町": {"id": "115", "targets": ["体育館反面A", "体育館反面B"]},
-    "伊興": {"id": "120", "targets": ["体育館反面A", "体育館反面B"]},
-    "スイム": {"id": "131", "targets": ["体育館反面A", "体育館反面B"]},
-    "東和": {"id": "116", "targets": ["体育館反面A", "体育館反面B"]},
-    "興本": {"id": "118", "targets": ["体育館反面A", "体育館反面B"]},
-    "花畑": {"id": "121", "targets": ["体育館反面A", "体育館反面B"]},
-    "江北": {"id": "119", "targets": ["体育館反面A", "体育館反面B"]},
-    "鹿浜": {"id": "117", "targets": ["体育館反面A", "体育館反面B"]}
+    "梅田": "114", "中央本町": "115", "伊興": "120", "スイム": "131",
+    "東和": "116", "興本": "118", "花畑": "121", "江北": "119", "鹿浜": "117"
 }
+TARGET_ROOMS = ["体育館反面A", "体育館反面B"]
 
 def is_target_time(date_str, time_str, facility_key):
-    """曜日と時間帯の判定"""
     try:
-        # 日付から曜日を取得 (date_str: "2026/05/10")
-        dt = datetime.datetime.strptime(date_str, "%Y/%m/%d")
-        is_weekend = dt.weekday() >= 5 # 5=土, 6=日
-        # 祝日の判定は簡易化のため週末に含めるか、土日条件で判定
-        
+        dt = datetime.datetime.strptime(date_str.split('(')[0], "%Y/%m/%d")
+        is_weekend = dt.weekday() >= 5
         if facility_key == "梅田":
-            if is_weekend: return True
-            return "夜間" in time_str # 平日は夜間のみ
-        return is_weekend # その他は土日祝のみ
+            return is_weekend or "夜間" in time_str
+        return is_weekend
     except:
         return False
 
@@ -52,60 +39,55 @@ def run_check():
     options.add_argument("--no-sandbox")
     options.add_argument("--window-size=1920,1080")
     driver = webdriver.Chrome(options=options)
-    
     found_list = []
     
     try:
-        for key, info in FACILITIES.items():
+        for key, f_id in FACILITIES.items():
             print(f"--- Checking: {key} ---")
-            url = f"https://k5.p-kashikan.jp/adachi-ku/index.php?shisetsu_pk={info['id']}"
-            driver.get(url)
-            time.sleep(3)
+            driver.get(f"https://k5.p-kashikan.jp/adachi-ku/index.php?shisetsu_pk={f_id}")
+            time.sleep(4) # 読み込み待ちを長めに
             
-            # ページ内のすべての行を取得
-            rows = driver.find_elements(By.CSS_SELECTOR, "tr")
-            for row in rows:
-                row_text = row.text
-                # 指定したターゲット（反面Aなど）が含まれる行かチェック
-                if any(t in row_text for t in info["targets"]):
-                    print(f"  [発見] {row_text.split()[0]}")
-                    try:
-                        # その行にある「空き状況」ボタンを探してクリック
-                        btn = row.find_element(By.PARTIAL_LINK_TEXT, "空き状況")
-                        driver.execute_script("arguments[0].click();", btn)
-                        time.sleep(3)
+            # 全ての「空き状況」ボタンを取得
+            buttons = driver.find_elements(By.XPATH, "//button[contains(text(), '空き状況')]")
+            
+            for btn in buttons:
+                # ボタンの親要素の行から部屋名を取得
+                row = btn.find_element(By.XPATH, "./ancestor::tr")
+                room_name = row.text.split()[0]
+                
+                if any(t in room_name for t in TARGET_ROOMS):
+                    print(f"  [発見] {room_name} のカレンダーへ...")
+                    driver.execute_script("arguments[0].click();", btn)
+                    time.sleep(3)
+                    
+                    # カレンダーの全行を走査
+                    cal_rows = driver.find_elements(By.CSS_SELECTOR, "table.calendar_table tr")
+                    current_date = ""
+                    for c_row in cal_rows:
+                        cells = c_row.find_elements(By.TAG_NAME, "td")
+                        # 日付行の処理
+                        if "calendar_day" in c_row.get_attribute("class") or len(cells) < 2:
+                            if "(" in c_row.text:
+                                current_date = c_row.text.strip()
+                            continue
                         
-                        # カレンダーテーブルの解析
-                        # 1ヶ月分チェック
-                        cal_rows = driver.find_elements(By.CSS_SELECTOR, ".calendar_table tr")
-                        current_date = ""
-                        for cal_row in cal_rows:
-                            cols = cal_row.find_elements(By.TAG_NAME, "td")
-                            if not cols: continue
-                            
-                            # 日付行の取得
-                            if "calendar_day" in cal_row.get_attribute("class") or len(cols) < 3:
-                                current_date = cal_row.text.split('(')[0].strip()
-                                continue
-                            
-                            # 時間帯と空き状況の取得
-                            time_range = cols[0].text
-                            status = cols[1].text
-                            
+                        # 枠ごとの処理
+                        if len(cells) >= 2:
+                            t_range = cells[0].text
+                            status = cells[1].text
                             if "○" in status or "◯" in status:
-                                if is_target_time(current_date, time_range, key):
-                                    found_list.append(f"【{key}】{current_date} {time_range} ({row_text.split()[0]})")
-                                    print(f"    ★空きあり: {current_date} {time_range}")
-
-                        driver.back()
-                        time.sleep(2)
-                    except Exception as e:
-                        print(f"    × ボタン操作失敗")
-                        continue
+                                if is_target_time(current_date, t_range, key):
+                                    found_list.append(f"【{key}】{current_date} {t_range} ({room_name})")
+                                    print(f"    ★空きあり: {current_date} {t_range}")
+                    
+                    driver.back()
+                    time.sleep(2)
+                    # ページが戻るとボタン要素が古くなるので、再度取得し直す
+                    break # 今回は1施設1部屋ずつ確実に回るため一旦抜ける
 
         if found_list:
             send_email("以下の空きが見つかりました：\n\n" + "\n".join(found_list))
-            print(">> メールを送信しました！")
+            print(">> メールを送信完了")
         else:
             print(">> 条件に合う空きはありませんでした。")
 
